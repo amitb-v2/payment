@@ -1,7 +1,7 @@
 # -----------------------------------------------------------------------------
 # Microservice Deploy — Docker build -> AWS ECR -> EC2 (via SSM)
 # -----------------------------------------------------------------------------
-# Trigger: push to feature/ci-cd-pipeline (or run manually from the Actions tab).
+# Trigger: push to master (or run manually from the Actions tab).
 #
 # Flow:
 #   1. Build this repository's Docker image.
@@ -23,7 +23,7 @@ name: Deploy to EC2
 on:
   push:
     branches:
-      - feature/ci-cd-pipeline
+      - master
   workflow_dispatch:
 
 permissions:
