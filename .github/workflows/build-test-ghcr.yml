@@ -1,0 +1,108 @@
+# -----------------------------------------------------------------------------
+# TEST PIPELINE (no AWS) — Build Docker image + push to GitHub Container Registry
+# -----------------------------------------------------------------------------
+# Purpose: prove the build half of the real pipeline works before AWS access
+# is available. Later, the "push to GHCR" part is swapped for "push to ECR"
+# and the deploy job is added.
+#
+# Result: image appears at ghcr.io/<owner>/<service>
+#         (GitHub profile -> Packages tab)
+# -----------------------------------------------------------------------------
+
+name: Build Test (GHCR)
+
+on:
+  push:
+    branches:
+      - feature/ci-cd-pipeline
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write   # needed to push to ghcr.io with GITHUB_TOKEN
+
+concurrency:
+  group: build-test-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  SERVICE_NAME: "payment"
+  DOCKERFILE_PATH: "docker/payment/Dockerfile"
+  CONTAINER_PORT: "8080"
+  HEALTH_PATH: "/health"
+
+jobs:
+
+  build-and-push:
+    name: Build and Push to GHCR
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # GHCR image names must be lowercase.
+      - name: Compute image name
+        id: meta
+        run: |
+          OWNER=$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')
+          echo "image=ghcr.io/${OWNER}/${SERVICE_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ env.DOCKERFILE_PATH }}
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ github.sha }}
+            ${{ steps.meta.outputs.image }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Stands in for the EC2 deploy: pull the pushed image and check it starts.
+  smoke-test:
+    name: Pull and Smoke Test
+    runs-on: ubuntu-latest
+    needs: build-and-push
+
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull and run image
+        run: |
+          IMAGE="${{ needs.build-and-push.outputs.image }}:${GITHUB_SHA}"
+          docker pull "$IMAGE"
+          docker run -d --name "$SERVICE_NAME" -p 8080:"$CONTAINER_PORT" "$IMAGE"
+
+      - name: Health check
+        run: |
+          for i in $(seq 1 15); do
+            if curl -fsS "http://localhost:8080${HEALTH_PATH}"; then
+              echo
+              echo "Service is healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Service did not become healthy"
+          docker logs "$SERVICE_NAME"
+          exit 1
