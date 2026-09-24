@@ -1,0 +1,67 @@
+# -----------------------------------------------------------------------------
+# AWS LOGIN TEST — checks GitHub can log in to AWS via OIDC and what the role
+# is allowed to do. Read-only: nothing is created, pushed or deployed.
+# -----------------------------------------------------------------------------
+
+name: AWS Login Test
+
+on:
+  push:
+    branches:
+      - feature/ci-cd-pipeline
+    paths:
+      - .github/workflows/aws-login-test.yml
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: weave-socks/payment
+
+jobs:
+  login-test:
+    name: AWS Login Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+
+      - name: Who am I
+        run: aws sts get-caller-identity --query Arn --output text
+
+      # Calls against a repository that may not exist yet:
+      #   AccessDenied       -> role lacks the permission
+      #   RepositoryNotFound -> permission OK (repo just doesn't exist yet)
+      - name: Probe ECR permissions
+        run: |
+          D=sha256:0000000000000000000000000000000000000000000000000000000000000000
+          probe() {
+            name=$1; shift
+            if out=$(aws ecr "$@" 2>&1); then r="ALLOWED"
+            elif echo "$out" | grep -q "AccessDenied\|not authorized"; then r="DENIED"
+            elif echo "$out" | grep -q "RepositoryNotFound"; then r="ALLOWED (repo not created yet)"
+            else r="UNKNOWN: $(echo "$out" | head -c 200)"; fi
+            printf '%-32s %s\n' "$name" "$r"
+          }
+          aws ecr get-authorization-token >/dev/null && echo "ECR login                        ALLOWED"
+          probe "DescribeRepositories"        describe-repositories --repository-names "$ECR_REPOSITORY"
+          probe "InitiateLayerUpload (push)"  initiate-layer-upload --repository-name "$ECR_REPOSITORY"
+          probe "PutImage (push)"             put-image --repository-name "$ECR_REPOSITORY" --image-manifest '{}' --image-tag probe
+          probe "BatchGetImage (pull)"        batch-get-image --repository-name "$ECR_REPOSITORY" --image-ids imageTag=latest
+          probe "GetLifecyclePolicy"          get-lifecycle-policy --repository-name "$ECR_REPOSITORY"
+
+      - name: Probe SSM read permission
+        run: |
+          if aws ssm list-command-invocations --max-items 1 >/dev/null 2>&1; then
+            echo "ListCommandInvocations           ALLOWED"
+          else
+            echo "ListCommandInvocations           DENIED"
+          fi
+          echo "(ssm:SendCommand can only be verified by a real deploy)"
