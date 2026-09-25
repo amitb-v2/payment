@@ -43,8 +43,8 @@ env:
   # --- per-repository values ---
   SERVICE_NAME: payment                         # service name in docker-compose.yml
   ECR_REPOSITORY: weave-socks/payment           # must match the image in docker-compose.override.yml
-  DOCKERFILE_PATH: docker/payment/Dockerfile
-  BUILD_CONTEXT: .
+  DOCKERFILE_PATH: docker/payment/Dockerfile-release
+  BUILD_CONTEXT: build                         # binary built by the test step
   STABLE_SECONDS: 30
 
 jobs:
@@ -59,12 +59,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Unit tests on Go 1.7 with the vendored dependency list (gvt), same
-      # toolchain as the Dockerfile; a failure stops the job before anything
-      # is pushed to ECR or deployed.
-      - name: Unit tests
+      # Test and compile once (Go 1.7, gvt), retrying the dependency download;
+      # the image then only packages the built binary. A failure stops the job
+      # before anything is pushed.
+      - name: Unit tests and build binary
         run: |
-          git archive HEAD | docker run --rm -i golang:1.7 sh -c 'P=/go/src/github.com/microservices-demo/payment; mkdir -p $P && cd $P && tar -x && go get -u github.com/FiloSottile/gvt && gvt restore >/dev/null && go test $(go list ./... | grep -v /vendor/)'
+          mkdir -p build
+          git archive HEAD | docker run --rm -i -v "$PWD/build":/out golang:1.7 sh -c '
+            P=/go/src/github.com/microservices-demo/payment; mkdir -p $P && cd $P && tar -x &&
+            go get -u github.com/FiloSottile/gvt &&
+            for n in 1 2 3; do gvt restore && break; echo "gvt restore attempt $n failed"; [ $n = 3 ] && exit 1; sleep 10; done &&
+            go test $(go list ./... | grep -v /vendor/) &&
+            CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o /out/app ./cmd/paymentsvc'
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
